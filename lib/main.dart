@@ -42,16 +42,30 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class EventItem {
-  final int eventNo;
-  final String title;
-  final String? subtitle;
+class ReservItem {
+  final int reservNo;
+  final DateTime reservFrom;
+  final int visitCnt;
+  final String? reservMemo;
+  final String visitorName;
 
-  const EventItem({
-    required this.eventNo,
-    required this.title,
-    this.subtitle,
+  const ReservItem({
+    required this.reservNo,
+    required this.reservFrom,
+    required this.visitCnt,
+    required this.reservMemo,
+    required this.visitorName,
   });
+
+  factory ReservItem.fromJson(Map<String, dynamic> j) {
+    return ReservItem(
+      reservNo: j['reservNo'] as int,
+      reservFrom: DateTime.parse(j['reservFrom'] as String),
+      visitCnt: j['visitCnt'] as int,
+      reservMemo: j['reservMemo'] as String?,
+      visitorName: (j['visitorName'] as String?) ?? '',
+    );
+  }
 }
 
 /// 설정 화면: baseUrl 편집
@@ -153,57 +167,123 @@ class _SettingsPageState extends State<SettingsPage> {
 }
 
 /// 1) 초기 화면: 이벤트 목록(카드) + 설정 진입
-class EventListPage extends StatelessWidget {
+class EventListPage extends StatefulWidget {
   const EventListPage({super.key});
 
-  final List<EventItem> _events = const [
-    EventItem(eventNo: 101, title: '봄 축제', subtitle: '2026-03-01 ~ 2026-03-03'),
-    EventItem(eventNo: 102, title: '개막식', subtitle: '메인 홀'),
-    EventItem(eventNo: 103, title: '세미나', subtitle: 'A룸'),
-    EventItem(eventNo: 104, title: '폐막식', subtitle: '야외 무대'),
-  ];
+  @override
+  State<EventListPage> createState() => _EventListPageState();
+}
+
+class _EventListPageState extends State<EventListPage> {
+  late Future<List<ReservItem>> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _fetchReservs();
+  }
+
+  Future<List<ReservItem>> _fetchReservs() async {
+    final baseUrl = await AppConfig.getBaseUrl();
+    final uri = Uri.parse('$baseUrl/api/get_reserv');
+
+    final resp = await http.get(uri);
+    if (resp.statusCode != 200) {
+      throw Exception('예약 목록 조회 실패: ${resp.statusCode} ${resp.body}');
+    }
+
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    final list = (data['reservs'] as List<dynamic>? ?? []);
+    return list
+        .map((e) => ReservItem.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  String _fmtDateTime(DateTime dt) {
+    // 필요하면 toLocal() 유지/제거 선택
+    final d = dt.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+  }
+
+  Future<void> _openSettings() async {
+    final changed = await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const SettingsPage()),
+    );
+
+    // baseUrl 바뀌었을 수 있으니 재조회
+    if (changed == true) {
+      setState(() => _future = _fetchReservs());
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('이벤트 선택'),
+        title: const Text('예약 목록'),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
-            onPressed: () async {
-              await Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SettingsPage()),
-              );
-            },
+            onPressed: _openSettings,
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () => setState(() => _future = _fetchReservs()),
           ),
         ],
       ),
-      body: ListView.separated(
-        padding: const EdgeInsets.all(16),
-        itemCount: _events.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
-        itemBuilder: (context, i) {
-          final e = _events[i];
-          return Card(
-            child: ListTile(
-              title: Text(e.title),
-              subtitle: Text('eventNo: ${e.eventNo}${e.subtitle != null ? '\n${e.subtitle}' : ''}'),
-              isThreeLine: e.subtitle != null,
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => CameraUploadPage(
-                      eventNo: e.eventNo,
-                      eventTitle: e.title,
-                    ),
+      body: FutureBuilder<List<ReservItem>>(
+        future: _future,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snap.hasError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text('오류: ${snap.error}'),
+              ),
+            );
+          }
+
+          final items = snap.data ?? [];
+          if (items.isEmpty) {
+            return const Center(child: Text('예약이 없습니다.'));
+          }
+
+          return ListView.separated(
+            padding: const EdgeInsets.all(16),
+            itemCount: items.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 12),
+            itemBuilder: (context, i) {
+              final r = items[i];
+
+              // 카드 표시: 예약번호 / 예약시간 / 방문자수 / 방문자
+              return Card(
+                child: ListTile(
+                  title: Text('${r.visitorName}  (${r.visitCnt}명)'),
+                  subtitle: Text(
+                    '예약번호: ${r.reservNo}\n예약시간: ${_fmtDateTime(r.reservFrom)}',
                   ),
-                );
-              },
-            ),
+                  isThreeLine: true,
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => CameraUploadPage(
+                          eventNo: r.reservNo,       // <- 여기서 reservNo를 넘김
+                          eventTitle: r.visitorName, // <- 화면 타이틀용
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              );
+            },
           );
         },
       ),
