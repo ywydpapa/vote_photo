@@ -213,7 +213,9 @@ class _EventListPageState extends State<EventListPage> {
 
     // baseUrl 바뀌었을 수 있으니 재조회
     if (changed == true) {
-      setState(() => _future = _fetchReservs());
+      setState(() {
+        _future = _fetchReservs();
+      });
     }
   }
 
@@ -229,7 +231,11 @@ class _EventListPageState extends State<EventListPage> {
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: () => setState(() => _future = _fetchReservs()),
+            onPressed: () {
+              setState(() {
+                _future = _fetchReservs();
+              });
+            },
           ),
         ],
       ),
@@ -253,36 +259,48 @@ class _EventListPageState extends State<EventListPage> {
             return const Center(child: Text('예약이 없습니다.'));
           }
 
-          return ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemCount: items.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 12),
-            itemBuilder: (context, i) {
-              final r = items[i];
-
-              // 카드 표시: 예약번호 / 예약시간 / 방문자수 / 방문자
-              return Card(
-                child: ListTile(
-                  title: Text('${r.visitorName}  (${r.visitCnt}명)'),
-                  subtitle: Text(
-                    '예약번호: ${r.reservNo}\n예약시간: ${_fmtDateTime(r.reservFrom)}',
-                  ),
-                  isThreeLine: true,
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => CameraUploadPage(
-                          eventNo: r.reservNo,       // <- 여기서 reservNo를 넘김
-                          eventTitle: r.visitorName, // <- 화면 타이틀용
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              );
+          return RefreshIndicator(
+            onRefresh: () async {
+              final f = _fetchReservs();
+              setState(() {
+                _future = f;
+              });
+              await f;
             },
+            child: ListView.separated(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.all(16),
+              itemCount: items.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 12),
+              itemBuilder: (context, i) {
+                final r = items[i];
+                return Card(
+                  child: ListTile(
+                    title: Text('${r.visitorName}  (${r.visitCnt}명)'),
+                    subtitle: Text(
+                      '예약번호: ${r.reservNo}\n예약시간: ${_fmtDateTime(r.reservFrom)}',
+                    ),
+                    isThreeLine: true,
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () async {
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => CameraUploadPage(
+                            eventNo: r.reservNo,
+                            eventTitle: r.visitorName,
+                          ),
+                        ),
+                      );
+                      if (!mounted) return;
+                      setState(() {
+                        _future = _fetchReservs();
+                      });
+                    },
+                  ),
+                );
+              },
+            ),
           );
         },
       ),
@@ -452,8 +470,7 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
       case UploadState.failed:
         return const Chip(label: Text('업로드 실패'));
       case UploadState.pending:
-      default:
-        return const Chip(label: Text('대기'));
+      return const Chip(label: Text('대기'));
     }
   }
 
