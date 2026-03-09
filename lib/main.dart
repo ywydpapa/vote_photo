@@ -14,7 +14,7 @@ void main() {
 
 class AppConfig {
   static const _kBaseUrlKey = 'baseUrl';
-  static const String defaultBaseUrl = 'http://10.0.2.2:8000';
+  static const String defaultBaseUrl = 'http://sejongoff.iptime.org';
 
   static Future<String> getBaseUrl() async {
     final prefs = await SharedPreferences.getInstance();
@@ -47,6 +47,7 @@ class ReservItem {
   final int visitCnt;
   final String? reservMemo;
   final String visitorName;
+  final String status; // 새로 추가된 status 필드
 
   const ReservItem({
     required this.reservNo,
@@ -54,6 +55,7 @@ class ReservItem {
     required this.visitCnt,
     required this.reservMemo,
     required this.visitorName,
+    required this.status, // 생성자에 추가
   });
 
   factory ReservItem.fromJson(Map<String, dynamic> j) {
@@ -63,6 +65,7 @@ class ReservItem {
       visitCnt: j['visitCnt'] as int,
       reservMemo: j['reservMemo'] as String?,
       visitorName: (j['visitorName'] as String?) ?? '',
+      status: (j['status'] as String?) ?? '', // JSON에서 status 파싱
     );
   }
 }
@@ -193,13 +196,15 @@ class _EventListPageState extends State<EventListPage> {
 
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     final list = (data['reservs'] as List<dynamic>? ?? []);
+
     return list
         .map((e) => ReservItem.fromJson(e as Map<String, dynamic>))
+    // 조건: status가 '1111111111' 이거나 '1000010000' 인 것만 필터링
+        .where((r) => r.status == '1111111111' || r.status == '1000010000')
         .toList();
   }
 
   String _fmtDateTime(DateTime dt) {
-    // 필요하면 toLocal() 유지/제거 선택
     final d = dt.toLocal();
     String two(int n) => n.toString().padLeft(2, '0');
     return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
@@ -211,7 +216,6 @@ class _EventListPageState extends State<EventListPage> {
       MaterialPageRoute(builder: (_) => const SettingsPage()),
     );
 
-    // baseUrl 바뀌었을 수 있으니 재조회
     if (changed == true) {
       setState(() {
         _future = _fetchReservs();
@@ -274,9 +278,35 @@ class _EventListPageState extends State<EventListPage> {
               separatorBuilder: (_, __) => const SizedBox(height: 12),
               itemBuilder: (context, i) {
                 final r = items[i];
+                final isVisiting = r.status == '1111111111'; // 방문중 상태 확인
+
                 return Card(
                   child: ListTile(
-                    title: Text('${r.visitorName}  (${r.visitCnt}명)'),
+                    title: Row(
+                      children: [
+                        Text('${r.visitorName}  (${r.visitCnt}명)'),
+                        // status가 '1111111111'일 때만 초록색 '방문중' 문구 표시
+                        if (isVisiting) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.green.shade50,
+                              border: Border.all(color: Colors.green),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Text(
+                              '방문중',
+                              style: TextStyle(
+                                color: Colors.green,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                     subtitle: Text(
                       '예약번호: ${r.reservNo}\n예약시간: ${_fmtDateTime(r.reservFrom)}',
                     ),
@@ -470,7 +500,7 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
       case UploadState.failed:
         return const Chip(label: Text('업로드 실패'));
       case UploadState.pending:
-      return const Chip(label: Text('대기'));
+        return const Chip(label: Text('대기'));
     }
   }
 
