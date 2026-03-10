@@ -416,8 +416,6 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
 
     final x = await _picker.pickImage(
       source: ImageSource.camera,
-      imageQuality: 85,
-      maxWidth: 1600,
     );
     if (x == null) return;
 
