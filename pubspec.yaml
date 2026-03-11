@@ -31,6 +31,7 @@ dependencies:
   flutter:
     sdk: flutter
   image_picker: ^1.0.7
+  camera: ^0.10.5
   http: ^1.2.1
   http_parser: ^4.0.2
   mime: ^1.0.4
