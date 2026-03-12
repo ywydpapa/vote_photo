@@ -7,10 +7,77 @@ import 'package:http_parser/http_parser.dart';
 import 'package:mime/mime.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
+
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MyApp());
+}
+
+/// 로컬 파일 저장 및 업로드 상태 관리를 위한 헬퍼 클래스
+class LocalStorageHelper {
+  // 1. 임시 파일을 영구 로컬 폴더로 복사
+  static Future<String> saveAndFixPhotoLocally(int eventNo, String tempPath, int imageQuality) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final eventDir = Directory('${dir.path}/events/$eventNo');
+    if (!await eventDir.exists()) {
+      await eventDir.create(recursive: true);
+    }
+
+    final fileName = '${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final targetPath = '${eventDir.path}/$fileName';
+
+    // 화질 설정에 따른 압축률 결정 (0: 속도, 1: 표준, 2: 원본/고품질)
+    int compressQuality = 100;
+    if (imageQuality == 0) compressQuality = 60; // 속도 위주 (용량 대폭 감소)
+    else if (imageQuality == 1) compressQuality = 85; // 표준
+
+    // compressAndGetFile은 기본적으로 EXIF 회전 정보를 읽어
+    // 픽셀 자체를 올바른 방향으로 회전(autoCorrectionAngle: true)시켜 줍니다.
+    final XFile? compressedFile = await FlutterImageCompress.compressAndGetFile(
+      tempPath,
+      targetPath,
+      quality: compressQuality,
+    );
+
+    // 압축/회전이 실패하면 원본을 복사해서 반환
+    if (compressedFile == null) {
+      final savedImage = await File(tempPath).copy(targetPath);
+      return savedImage.path;
+    }
+
+    return compressedFile.path;
+  }
+
+  // 2. 해당 이벤트의 로컬에 저장된 모든 사진 경로 불러오기
+  static Future<List<String>> getSavedPhotos(int eventNo) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final eventDir = Directory('${dir.path}/events/$eventNo');
+    if (!await eventDir.exists()) return [];
+
+    final files = eventDir.listSync().whereType<File>().where((f) => f.path.endsWith('.jpg')).toList();
+    files.sort((a, b) => a.path.compareTo(b.path)); // 시간순 정렬
+    return files.map((f) => f.path).toList();
+  }
+
+  // 3. 사진별 업로드 상태 SharedPreferences에 저장
+  static Future<void> saveUploadStatus(String path, String status, {String? url}) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('status_$path', status);
+    if (url != null) {
+      await prefs.setString('url_$path', url);
+    }
+  }
+
+  // 4. 사진별 업로드 상태 불러오기
+  static Future<Map<String, String?>> getUploadStatus(String path) async {
+    final prefs = await SharedPreferences.getInstance();
+    final status = prefs.getString('status_$path') ?? 'pending';
+    final url = prefs.getString('url_$path');
+    return {'status': status, 'url': url};
+  }
 }
 
 class AppConfig {
@@ -433,6 +500,38 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
   int _currentIndex = 0;
   int _uploadingCount = 0;
 
+  @override
+  void initState() {
+    super.initState();
+    _loadExistingPhotos(); // 화면 진입 시 기존 저장된 사진 불러오기
+  }
+
+  // 기존에 로컬에 저장된 사진과 상태를 불러오는 함수
+  Future<void> _loadExistingPhotos() async {
+    final paths = await LocalStorageHelper.getSavedPhotos(widget.eventNo);
+    for (final path in paths) {
+      final info = await LocalStorageHelper.getUploadStatus(path);
+      final statusStr = info['status'];
+      final url = info['url'];
+
+      UploadState state = UploadState.pending;
+      if (statusStr == 'uploading') state = UploadState.failed; // 앱 종료 등으로 중단된 경우 실패로 간주
+      else if (statusStr == 'done') state = UploadState.done;
+      else if (statusStr == 'failed') state = UploadState.failed;
+
+      _shots.add(ShotItem(
+        localPath: path,
+        state: state,
+        uploadedUrl: url,
+      ));
+    }
+
+    if (_shots.isNotEmpty) {
+      _currentIndex = _shots.length - 1;
+    }
+    if (mounted) setState(() {});
+  }
+
   Future<String> _uploadPhotoAndGetAbsoluteUrl({
     required String baseUrl,
     required String filePath,
@@ -485,8 +584,17 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
     );
   }
 
-  void _handleNewPhoto(String path) async {
-    final shot = ShotItem(localPath: path, state: UploadState.uploading);
+  void _handleNewPhoto(String tempPath) async {
+    // 1. 임시 파일을 로컬 영구 저장소로 복사
+    final imageQuality = await AppConfig.getImageQuality();
+    final persistentPath = await LocalStorageHelper.saveAndFixPhotoLocally(
+        widget.eventNo,
+        tempPath,
+        imageQuality
+    );
+    await LocalStorageHelper.saveUploadStatus(persistentPath, 'uploading');
+
+    final shot = ShotItem(localPath: persistentPath, state: UploadState.uploading);
 
     setState(() {
       _shots.add(shot);
@@ -504,8 +612,11 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
       final baseUrl = await AppConfig.getBaseUrl();
       final absoluteUrl = await _uploadPhotoAndGetAbsoluteUrl(
         baseUrl: baseUrl,
-        filePath: path,
+        filePath: persistentPath, // 영구 저장된 경로 사용
       );
+
+      // 2. 업로드 성공 시 상태 기록
+      await LocalStorageHelper.saveUploadStatus(persistentPath, 'done', url: absoluteUrl);
 
       if (mounted) {
         setState(() {
@@ -515,6 +626,9 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
         });
       }
     } catch (e) {
+      // 3. 업로드 실패 시 상태 기록
+      await LocalStorageHelper.saveUploadStatus(persistentPath, 'failed');
+
       if (mounted) {
         setState(() {
           shot.state = UploadState.failed;
@@ -530,6 +644,7 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
     }
   }
 
+  // 재시도 로직 수정
   Future<void> _retryUploadCurrent() async {
     if (_shots.isEmpty) return;
     final shot = _shots[_currentIndex];
@@ -541,6 +656,8 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
       _uploadingCount++;
     });
 
+    await LocalStorageHelper.saveUploadStatus(shot.localPath, 'uploading');
+
     try {
       final baseUrl = await AppConfig.getBaseUrl();
       final absoluteUrl = await _uploadPhotoAndGetAbsoluteUrl(
@@ -548,11 +665,15 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
         filePath: shot.localPath,
       );
 
+      await LocalStorageHelper.saveUploadStatus(shot.localPath, 'done', url: absoluteUrl);
+
       setState(() {
         shot.uploadedUrl = absoluteUrl;
         shot.state = UploadState.done;
       });
     } catch (e) {
+      await LocalStorageHelper.saveUploadStatus(shot.localPath, 'failed');
+
       setState(() {
         shot.state = UploadState.failed;
         shot.error = e.toString();
@@ -561,6 +682,7 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
       if (mounted) setState(() => _uploadingCount--);
     }
   }
+
 
   @override
   void dispose() {
@@ -730,6 +852,12 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
   List<CameraDescription> _cameras = [];
   bool _isReady = false;
 
+  // 줌 관련 변수 추가
+  double _minAvailableZoom = 1.0;
+  double _maxAvailableZoom = 1.0;
+  double _currentZoomLevel = 1.0;
+  double _baseZoomLevel = 1.0; // 핀치 줌 계산용
+
   @override
   void initState() {
     super.initState();
@@ -754,11 +882,16 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
       _cameras = await availableCameras();
       if (_cameras.isNotEmpty) {
         _controller = CameraController(
-          _cameras[0], // 후면 카메라
-          _getResolutionPreset(), // 설정된 화질 적용
+          _cameras[0],
+          _getResolutionPreset(),
           enableAudio: false,
         );
         await _controller!.initialize();
+
+        // 카메라가 지원하는 최소/최대 줌 레벨 가져오기
+        _maxAvailableZoom = await _controller!.getMaxZoomLevel();
+        _minAvailableZoom = await _controller!.getMinZoomLevel();
+
         if (mounted) {
           setState(() {
             _isReady = true;
@@ -777,7 +910,8 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
   }
 
   Future<void> _takePicture() async {
-    if (_controller == null || !_controller!.value.isInitialized || _controller!.value.isTakingPicture) {
+    if (_controller == null || !_controller!.value.isInitialized ||
+        _controller!.value.isTakingPicture) {
       return;
     }
 
@@ -788,20 +922,21 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
         if (!mounted) return;
         final confirmed = await showDialog<bool>(
           context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('사진 확인'),
-            content: Image.file(File(file.path)),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('다시 찍기'),
+          builder: (context) =>
+              AlertDialog(
+                title: const Text('사진 확인'),
+                content: Image.file(File(file.path)),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('다시 찍기'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('저장 및 업로드'),
+                  ),
+                ],
               ),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('저장 및 업로드'),
-              ),
-            ],
-          ),
         );
 
         if (confirmed == true) {
@@ -834,14 +969,62 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
       );
     }
 
+    const double targetAspectRatio = 4 / 3;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Stack(
           children: [
+            // 1. 4:3 프리뷰 영역 + 핀치 줌(Pinch-to-zoom) 제스처
             Positioned.fill(
-              child: CameraPreview(_controller!),
+              child: GestureDetector(
+                // 두 손가락 터치 시작 시 현재 줌 레벨 기억
+                onScaleStart: (details) {
+                  _baseZoomLevel = _currentZoomLevel;
+                },
+                // 두 손가락을 움직일 때 줌 레벨 계산 및 적용
+                onScaleUpdate: (details) async {
+                  if (_controller == null || !_isReady) return;
+
+                  double targetZoom = _baseZoomLevel * details.scale;
+
+                  // 기기가 지원하는 최소/최대 줌 범위를 벗어나지 않도록 제한
+                  if (targetZoom < _minAvailableZoom) {
+                    targetZoom = _minAvailableZoom;
+                  } else if (targetZoom > _maxAvailableZoom) {
+                    targetZoom = _maxAvailableZoom;
+                  }
+
+                  if (_currentZoomLevel != targetZoom) {
+                    setState(() {
+                      _currentZoomLevel = targetZoom;
+                    });
+                    await _controller!.setZoomLevel(_currentZoomLevel);
+                  }
+                },
+                child: Container(
+                  color: Colors.black,
+                  alignment: Alignment.center,
+                  child: AspectRatio(
+                    aspectRatio: targetAspectRatio,
+                    child: ClipRect(
+                      child: FittedBox(
+                        fit: BoxFit.cover,
+                        alignment: Alignment.center,
+                        child: SizedBox(
+                          width: _controller!.value.aspectRatio,
+                          height: 1.0,
+                          child: CameraPreview(_controller!),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ),
+
+            // 2. 닫기 버튼
             Positioned(
               top: 16,
               left: 16,
@@ -853,6 +1036,8 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
                 ),
               ),
             ),
+
+            // 3. 촬영 버튼
             Positioned(
               bottom: 32,
               left: 0,
@@ -872,6 +1057,29 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
                 ),
               ),
             ),
+
+            // 4. 현재 줌 배율 표시 (촬영 버튼 위쪽)
+            Positioned(
+              bottom: 120,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '${_currentZoomLevel.toStringAsFixed(1)}x',
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                ),
+              ),
+            ),
+
+            // 5. 연속 촬영 모드 안내 문구
             if (!widget.checkBeforeSave)
               Positioned(
                 top: 24,
@@ -879,7 +1087,8 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
                 right: 0,
                 child: Center(
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 8),
                     decoration: BoxDecoration(
                       color: Colors.black54,
                       borderRadius: BorderRadius.circular(20),
