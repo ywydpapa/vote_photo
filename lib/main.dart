@@ -10,7 +10,8 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
-import 'package:image/image.dart' as img; // 이미지 크롭을 위해 추가
+import 'package:image/image.dart' as img;
+import 'dart:async';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -304,13 +305,36 @@ class EventListPage extends StatefulWidget {
   State<EventListPage> createState() => _EventListPageState();
 }
 
-class _EventListPageState extends State<EventListPage> {
+class _EventListPageState extends State<EventListPage> with WidgetsBindingObserver {
   late Future<List<ReservItem>> _future;
+  Timer? _timer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _future = _fetchReservs();
+
+    // 30초마다 백그라운드에서 자동으로 새로고침 (AJAX 처럼 동작)
+    _timer = Timer.periodic(const Duration(seconds: 30), (timer) {
+      if (mounted) {
+        setState(() => _future = _fetchReservs());
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel(); // 화면이 종료될 때 타이머 해제
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      setState(() => _future = _fetchReservs());
+    }
   }
 
   Future<List<ReservItem>> _fetchReservs() async {
@@ -379,9 +403,9 @@ class _EventListPageState extends State<EventListPage> {
         title: const Text('예약 목록'),
         actions: [
           IconButton(icon: const Icon(Icons.settings), onPressed: () async {
-            if (await Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsPage())) == true) {
-              setState(() => _future = _fetchReservs());
-            }
+            await Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsPage()));
+            if (!mounted) return;
+            setState(() => _future = _fetchReservs());
           }),
           IconButton(icon: const Icon(Icons.refresh), onPressed: () => setState(() => _future = _fetchReservs())),
         ],
@@ -389,8 +413,12 @@ class _EventListPageState extends State<EventListPage> {
       body: FutureBuilder<List<ReservItem>>(
         future: _future,
         builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) return const Center(child: CircularProgressIndicator());
+          // 기존 데이터가 없을 때(최초 로딩)만 로딩 인디케이터 표시
+          if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
           if (snap.hasError) return Center(child: Text('오류: ${snap.error}'));
+
           final items = snap.data ?? [];
           if (items.isEmpty) return const Center(child: Text('예약이 없습니다.'));
 
@@ -402,7 +430,25 @@ class _EventListPageState extends State<EventListPage> {
               final r = items[i];
               return Card(
                 child: ListTile(
-                  title: Text('${r.visitorName} (${r.visitCnt}명)'),
+                  title: Row(
+                    children: [
+                      Text('${r.visitorName} (${r.visitCnt}명)'),
+                      if (r.status == '1111111111') ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.blueAccent,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Text(
+                            '도착',
+                            style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                   subtitle: Text('예약번호: ${r.reservNo}\n예약시간: ${_fmtDateTime(r.reservFrom)}'),
                   trailing: const Icon(Icons.camera_alt, color: Colors.blue),
                   onTap: () => _showUploadOptions(r),
