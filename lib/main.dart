@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart'; // compute 사용을 위해 추가
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:http/http.dart' as http;
@@ -12,23 +12,22 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:image/image.dart' as img;
 import 'dart:async';
+import 'package:image_picker/image_picker.dart'; // 💡 OS 카메라 사용을 위해 추가
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MyApp());
 }
 
-// 💡 업로드 타입을 구분하기 위한 Enum
 enum UploadType { event, guestbook }
 
 class LocalStorageHelper {
-  // 1. 임시 파일을 영구 로컬 폴더로 복사 및 비율에 맞게 크롭
   static Future<String> saveAndFixPhotoLocally(
       int eventNo,
       String tempPath,
       int imageQuality,
       UploadType type,
-      bool isPortraitRatio // 💡 UI에서 선택한 비율 정보
+      bool isPortraitRatio
       ) async {
     final dir = await getApplicationDocumentsDirectory();
     final folderName = type == UploadType.event ? 'events' : 'guestbooks';
@@ -45,7 +44,6 @@ class LocalStorageHelper {
     if (imageQuality == 0) compressQuality = 60;
     else if (imageQuality == 1) compressQuality = 85;
 
-    // 1단계: 회전 보정 및 압축 (EXIF 방향이 적용된 똑바른 이미지가 됨)
     final XFile? compressedFile = await FlutterImageCompress.compressAndGetFile(
       tempPath,
       targetPath,
@@ -54,7 +52,6 @@ class LocalStorageHelper {
 
     String finalPath = compressedFile?.path ?? tempPath;
 
-    // 2단계: UI가 멈추지 않도록 Isolate(백그라운드)에서 이미지 크롭 수행
     await compute(_cropImageInIsolate, {
       'path': finalPath,
       'isPortrait': isPortraitRatio,
@@ -63,7 +60,6 @@ class LocalStorageHelper {
     return finalPath;
   }
 
-  // 💡 백그라운드 이미지 크롭 로직 (선택한 비율과 실제 비율이 다르면 중앙을 기준으로 잘라냄)
   static void _cropImageInIsolate(Map<String, dynamic> params) {
     final String path = params['path'];
     final bool isPortrait = params['isPortrait'];
@@ -79,16 +75,13 @@ class LocalStorageHelper {
         double currentRatio = w / h;
         double targetRatio = isPortrait ? 3 / 4 : 4 / 3;
 
-        // 오차가 5% 이상 나면 크롭 진행
         if ((currentRatio - targetRatio).abs() > 0.05) {
           int cropW = w;
           int cropH = h;
 
           if (currentRatio > targetRatio) {
-            // 현재가 목표보다 더 넓음 (가로를 잘라야 함)
             cropW = (h * targetRatio).round();
           } else {
-            // 현재가 목표보다 더 김 (세로를 잘라야 함)
             cropH = (w / targetRatio).round();
           }
 
@@ -143,6 +136,10 @@ class AppConfig {
   static const _kImageQualityKey = 'imageQuality';
   static const int defaultImageQuality = 1;
 
+  // 💡 OS 카메라 사용 여부 설정 키 추가
+  static const _kUseOsCameraKey = 'useOsCamera';
+  static const bool defaultUseOsCamera = false;
+
   static Future<String> getBaseUrl() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_kBaseUrlKey) ?? defaultBaseUrl;
@@ -166,6 +163,16 @@ class AppConfig {
   static Future<void> setImageQuality(int value) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_kImageQualityKey, value);
+  }
+
+  // 💡 OS 카메라 설정 Getter/Setter 추가
+  static Future<bool> getUseOsCamera() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_kUseOsCameraKey) ?? defaultUseOsCamera;
+  }
+  static Future<void> setUseOsCamera(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kUseOsCameraKey, value);
   }
 }
 
@@ -220,6 +227,7 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   final _controller = TextEditingController();
   bool _checkBeforeSave = false;
+  bool _useOsCamera = false; // 💡 상태 변수 추가
   double _imageQuality = 1.0;
   bool _saving = false;
   final List<String> _qualityLabels = ['속도 (1MB 이하)', '표준 (3MB 이하)', '고품질 (원본)'];
@@ -234,9 +242,11 @@ class _SettingsPageState extends State<SettingsPage> {
     final baseUrl = await AppConfig.getBaseUrl();
     final checkBeforeSave = await AppConfig.getCheckBeforeSave();
     final imageQuality = await AppConfig.getImageQuality();
+    final useOsCamera = await AppConfig.getUseOsCamera(); // 💡 로드
 
     _controller.text = baseUrl;
     _checkBeforeSave = checkBeforeSave;
+    _useOsCamera = useOsCamera;
     _imageQuality = imageQuality.toDouble();
     if (mounted) setState(() {});
   }
@@ -252,6 +262,7 @@ class _SettingsPageState extends State<SettingsPage> {
       await AppConfig.setBaseUrl(v);
       await AppConfig.setCheckBeforeSave(_checkBeforeSave);
       await AppConfig.setImageQuality(_imageQuality.toInt());
+      await AppConfig.setUseOsCamera(_useOsCamera); // 💡 저장
       if (!mounted) return;
       Navigator.pop(context, true);
     } finally {
@@ -279,6 +290,14 @@ class _SettingsPageState extends State<SettingsPage> {
               value: _checkBeforeSave,
               contentPadding: EdgeInsets.zero,
               onChanged: (bool value) => setState(() => _checkBeforeSave = value),
+            ),
+            // 💡 OS 카메라 사용 여부 스위치 추가
+            SwitchListTile(
+              title: const Text('OS 기본 카메라 사용'),
+              subtitle: const Text('체크 시 기기의 기본 카메라 앱을 사용합니다.'),
+              value: _useOsCamera,
+              contentPadding: EdgeInsets.zero,
+              onChanged: (bool value) => setState(() => _useOsCamera = value),
             ),
             const Divider(height: 32),
             Text('사진 화질: ${_qualityLabels[_imageQuality.toInt()]}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
@@ -315,7 +334,6 @@ class _EventListPageState extends State<EventListPage> with WidgetsBindingObserv
     WidgetsBinding.instance.addObserver(this);
     _future = _fetchReservs();
 
-    // 30초마다 백그라운드에서 자동으로 새로고침 (AJAX 처럼 동작)
     _timer = Timer.periodic(const Duration(seconds: 30), (timer) {
       if (mounted) {
         setState(() => _future = _fetchReservs());
@@ -325,7 +343,7 @@ class _EventListPageState extends State<EventListPage> with WidgetsBindingObserv
 
   @override
   void dispose() {
-    _timer?.cancel(); // 화면이 종료될 때 타이머 해제
+    _timer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -413,7 +431,6 @@ class _EventListPageState extends State<EventListPage> with WidgetsBindingObserv
       body: FutureBuilder<List<ReservItem>>(
         future: _future,
         builder: (context, snap) {
-          // 기존 데이터가 없을 때(최초 로딩)만 로딩 인디케이터 표시
           if (snap.connectionState == ConnectionState.waiting && !snap.hasData) {
             return const Center(child: CircularProgressIndicator());
           }
@@ -530,26 +547,39 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
   Future<void> _openCamera() async {
     final checkBeforeSave = await AppConfig.getCheckBeforeSave();
     final imageQuality = await AppConfig.getImageQuality();
+    final useOsCamera = await AppConfig.getUseOsCamera(); // 💡 설정값 가져오기
 
-    await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => CustomCameraScreen(
-          checkBeforeSave: checkBeforeSave,
-          imageQuality: imageQuality,
-          uploadType: widget.uploadType,
-          onPictureTaken: (path, isPortrait) { // 💡 비율 정보 함께 전달
-            _handleNewPhoto(path, isPortrait);
-          },
+    if (useOsCamera) {
+      // 💡 OS 카메라 호출
+      final picker = ImagePicker();
+      final XFile? photo = await picker.pickImage(source: ImageSource.camera);
+
+      if (photo != null) {
+        // OS 카메라의 경우 방명록은 세로(3:4), 이벤트는 가로(4:3)를 기본 비율로 간주하여 크롭 진행
+        bool isPortrait = widget.uploadType == UploadType.guestbook;
+        _handleNewPhoto(photo.path, isPortrait);
+      }
+    } else {
+      // 💡 기존 전용 카메라 화면 호출
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => CustomCameraScreen(
+            checkBeforeSave: checkBeforeSave,
+            imageQuality: imageQuality,
+            uploadType: widget.uploadType,
+            onPictureTaken: (path, isPortrait) {
+              _handleNewPhoto(path, isPortrait);
+            },
+          ),
         ),
-      ),
-    );
+      );
+    }
   }
 
   void _handleNewPhoto(String tempPath, bool isPortraitRatio) async {
     final imageQuality = await AppConfig.getImageQuality();
 
-    // 💡 비율 정보를 넘겨주어 백그라운드에서 크롭 수행
     final persistentPath = await LocalStorageHelper.saveAndFixPhotoLocally(
         widget.eventNo, tempPath, imageQuality, widget.uploadType, isPortraitRatio
     );
@@ -626,11 +656,12 @@ class _CameraUploadPageState extends State<CameraUploadPage> {
   }
 }
 
+// CustomCameraScreen 코드는 변경 없이 그대로 유지됩니다.
 class CustomCameraScreen extends StatefulWidget {
   final bool checkBeforeSave;
   final int imageQuality;
   final UploadType uploadType;
-  final Function(String, bool) onPictureTaken; // 💡 비율 상태 전달
+  final Function(String, bool) onPictureTaken;
 
   const CustomCameraScreen({
     super.key,
@@ -658,7 +689,6 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
   @override
   void initState() {
     super.initState();
-    // 방명록은 세로(3:4) 기본, 이벤트는 가로(4:3) 기본
     _isPortraitRatio = widget.uploadType == UploadType.guestbook;
     _initCamera();
   }
@@ -717,11 +747,11 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
           ),
         );
         if (confirmed == true) {
-          widget.onPictureTaken(file.path, _isPortraitRatio); // 💡 선택된 비율 전달
+          widget.onPictureTaken(file.path, _isPortraitRatio);
           if (mounted) Navigator.pop(context);
         }
       } else {
-        widget.onPictureTaken(file.path, _isPortraitRatio); // 💡 선택된 비율 전달
+        widget.onPictureTaken(file.path, _isPortraitRatio);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('사진이 촬영되어 업로드를 시작합니다.'), duration: Duration(milliseconds: 800)),
@@ -742,7 +772,6 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
       );
     }
 
-    // 💡 현재 설정된 비율에 따라 프리뷰 영역의 AspectRatio 계산
     final double targetAspectRatio = _isPortraitRatio ? 3 / 4 : 4 / 3;
 
     return Scaffold(
@@ -750,7 +779,6 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
       body: SafeArea(
         child: Stack(
           children: [
-            // 1. 프리뷰 영역 + 핀치 줌
             Positioned.fill(
               child: GestureDetector(
                 onScaleStart: (details) => _baseZoomLevel = _currentZoomLevel,
@@ -769,7 +797,7 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
                   color: Colors.black,
                   alignment: Alignment.center,
                   child: AspectRatio(
-                    aspectRatio: targetAspectRatio, // 💡 동적 비율 적용
+                    aspectRatio: targetAspectRatio,
                     child: ClipRect(
                       child: FittedBox(
                         fit: BoxFit.cover,
@@ -785,8 +813,6 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
                 ),
               ),
             ),
-
-            // 2. 상단 툴바 (닫기 버튼 & 비율 전환 버튼)
             Positioned(
               top: 16,
               left: 16,
@@ -801,7 +827,6 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
                       onPressed: () => Navigator.pop(context),
                     ),
                   ),
-                  // 💡 가로/세로 비율 전환 버튼
                   GestureDetector(
                     onTap: () {
                       setState(() {
@@ -834,8 +859,6 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
                 ],
               ),
             ),
-
-            // 3. 촬영 버튼
             Positioned(
               bottom: 32,
               left: 0,
@@ -855,8 +878,6 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
                 ),
               ),
             ),
-
-            // 4. 현재 줌 배율 표시
             Positioned(
               bottom: 120,
               left: 0,
@@ -875,8 +896,6 @@ class _CustomCameraScreenState extends State<CustomCameraScreen> {
                 ),
               ),
             ),
-
-            // 5. 연속 촬영 모드 안내 문구
             if (!widget.checkBeforeSave)
               Positioned(
                 top: 80,
